@@ -367,15 +367,18 @@ function App(): JSX.Element {
     }
   }
 
-  // M keybind toggles mic (skips input/textarea focus)
+  // M keybind toggles mic, S keybind stops TTS (skip input/textarea focus)
   useEffect(() => {
-    if (!hasSpeech) return
     const handler = (e: KeyboardEvent) => {
-      if (e.key !== 'm' && e.key !== 'M') return
       const tag = (e.target as HTMLElement).tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
-      e.preventDefault()
-      toggleListening()
+      if ((e.key === 'm' || e.key === 'M') && hasSpeech) {
+        e.preventDefault()
+        toggleListening()
+      } else if (e.key === 's' || e.key === 'S') {
+        e.preventDefault()
+        if (isSpeakingRef.current) stopSpeaking()
+      }
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
@@ -1032,7 +1035,7 @@ function App(): JSX.Element {
                 onClick={stopSpeaking}
                 title="Stop Claude speaking"
               >
-                <span className="mic-toggle-label">Stop ⏹</span>
+                <span className="mic-toggle-label">Stop ⏹ (S)</span>
               </button>
             )}
             <button
