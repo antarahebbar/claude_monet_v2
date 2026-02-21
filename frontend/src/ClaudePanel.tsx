@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 // Minimal local types for Web Speech API (not in TS stdlib)
 interface ISpeechRecognition extends EventTarget {
@@ -14,23 +14,27 @@ interface ISpeechRecognition extends EventTarget {
 
 interface ISpeechRecognitionEvent extends Event {
   results: SpeechRecognitionResultList
+  resultIndex: number
 }
 
 type SpeechRecognitionCtor = new () => ISpeechRecognition
 
 // ResponsiveVoice.js types
 interface ResponsiveVoice {
-  speak: (text: string, voice: string, options?: {
-    pitch?: number
-    rate?: number
-    volume?: number
-    onstart?: () => void
-    onend?: () => void
-    onerror?: () => void
-  }) => void
+  speak: (
+    text: string,
+    voice: string,
+    options?: {
+      pitch?: number
+      rate?: number
+      volume?: number
+      onstart?: () => void
+      onend?: () => void
+      onerror?: () => void
+    },
+  ) => void
   cancel: () => void
   isPlaying: () => boolean
-  getVoices: () => Array<{ name: string }>
 }
 
 declare global {
@@ -41,173 +45,201 @@ declare global {
   }
 }
 
+// ── ASR filtering ────────────────────────────────────────────────────────────
+
+const FILLER_WORDS = new Set([
+  'um', 'uh', 'hmm', 'hm', 'ah', 'er', 'okay', 'ok',
+  'mhm', 'mmm', 'mm', 'yeah', 'yep', 'nope',
+])
+
+const MIN_MEANINGFUL_WORDS = 2
+
+function shouldSubmit(text: string): boolean {
+  const words = text.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const meaningful = words.filter((w) => !FILLER_WORDS.has(w))
+  return meaningful.length >= MIN_MEANINGFUL_WORDS
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
+
 interface ClaudePanelProps {
   isOpen: boolean
   onClose: () => void
 }
 
 export function ClaudePanel({ isOpen, onClose }: ClaudePanelProps) {
-  const [prompt, setPrompt] = useState('')
+  const [manualPrompt, setManualPrompt] = useState('')
   const [isListening, setIsListening] = useState(false)
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [liveTranscript, setLiveTranscript] = useState('')
   const [isSpeaking, setIsSpeaking] = useState(false)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [explanation, setExplanation] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-
-  // Debug ResponsiveVoice loading
-  useEffect(() => {
-    console.log('ClaudePanel mounted')
-    console.log('ResponsiveVoice at mount:', !!window.responsiveVoice)
-
-    // Check periodically if ResponsiveVoice loads
-    const checkInterval = setInterval(() => {
-      if (window.responsiveVoice) {
-        console.log('ResponsiveVoice is now available!')
-        clearInterval(checkInterval)
-      }
-    }, 1000)
-
-    return () => clearInterval(checkInterval)
-  }, [])
+  const [lastSubmitted, setLastSubmitted] = useState<string | null>(null)
 
   const recognitionRef = useRef<ISpeechRecognition | null>(null)
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
+  // Refs mirror state so recognition callbacks never see stale values
+  const isListeningRef = useRef(false)
+  const isSpeakingRef = useRef(false)
 
   const SpeechRecognitionClass: SpeechRecognitionCtor | undefined =
     window.SpeechRecognition ?? window.webkitSpeechRecognition
   const hasSpeech = !!SpeechRecognitionClass
-  const hasSpeechSynthesis = !!window.responsiveVoice || !!window.speechSynthesis
+  const hasTTS = !!window.responsiveVoice || !!window.speechSynthesis
 
-  // Cleanup speech synthesis on unmount
+  // Cancel any ongoing TTS when panel unmounts
   useEffect(() => {
     return () => {
-      if (window.responsiveVoice) {
-        window.responsiveVoice.cancel()
-      } else {
-        window.speechSynthesis?.cancel()
-      }
+      if (window.responsiveVoice) window.responsiveVoice.cancel()
+      else window.speechSynthesis?.cancel()
     }
   }, [])
 
-  const startListening = () => {
-    if (!SpeechRecognitionClass) return
+  // ── TTS ───────────────────────────────────────────────────────────────────
 
-    const recognition = new SpeechRecognitionClass()
-    recognition.continuous = false
-    recognition.interimResults = true
-    recognition.lang = 'en-US'
-
-    recognition.onresult = (e: ISpeechRecognitionEvent) => {
-      const transcript = Array.from(e.results)
-        .map((r) => r[0].transcript)
-        .join('')
-      setPrompt(transcript)
+  const speakResponse = (text: string, onDone?: () => void) => {
+    const handleEnd = () => {
+      isSpeakingRef.current = false
+      setIsSpeaking(false)
+      onDone?.()
     }
-    recognition.onend = () => setIsListening(false)
-    recognition.onerror = () => setIsListening(false)
 
-    recognitionRef.current = recognition
-    recognition.start()
-    setIsListening(true)
-  }
+    isSpeakingRef.current = true
+    setIsSpeaking(true)
 
-  const stopListening = () => {
-    recognitionRef.current?.stop()
-    setIsListening(false)
-  }
-
-  const speakResponse = (text: string) => {
-    if (!hasSpeechSynthesis) return
-
-    console.log('ResponsiveVoice available:', !!window.responsiveVoice)
-    console.log('ResponsiveVoice object:', window.responsiveVoice)
-
-    // Use ResponsiveVoice.js if available (better quality)
     if (window.responsiveVoice) {
-      // Stop any current speech
       window.responsiveVoice.cancel()
-
-      console.log('Using ResponsiveVoice.js for better quality TTS')
-
-      // Try different voice names that should sound more distinctive
-      const voiceOptions = [
-        'UK English Female',  // British accent
-        'Australian Female',  // Australian accent
-        'US English Female',  // Standard US
-        'UK English Male'     // Male British voice
-      ]
-
-      const voiceName = voiceOptions[0] // Start with UK English Female for distinctiveness
-
-      console.log(`Attempting to use voice: ${voiceName}`)
-
-      window.responsiveVoice.speak(text, voiceName, {
-        pitch: 1.2,        // Higher pitch for more distinctiveness
-        rate: 0.8,         // Slower for clarity
+      window.responsiveVoice.speak(text, 'UK English Female', {
+        pitch: 1.2,
+        rate: 0.8,
         volume: 1.0,
-        onstart: () => {
-          console.log('ResponsiveVoice started speaking')
-          setIsSpeaking(true)
-        },
-        onend: () => {
-          console.log('ResponsiveVoice finished speaking')
-          setIsSpeaking(false)
-        },
-        onerror: (error: any) => {
-          console.error('ResponsiveVoice error:', error)
-          setIsSpeaking(false)
-        }
+        onend: handleEnd,
+        onerror: handleEnd,
       })
-    } else {
-      // Fallback to native Speech Synthesis API
-      console.log('ResponsiveVoice not available, using fallback native Speech Synthesis API')
-
+    } else if (window.speechSynthesis) {
       window.speechSynthesis.cancel()
-
       const utterance = new SpeechSynthesisUtterance(text)
       utterance.rate = 0.8
       utterance.pitch = 1.15
       utterance.volume = 1.0
-
-      utterance.onstart = () => {
-        console.log('Native speech synthesis started')
-        setIsSpeaking(true)
-      }
-      utterance.onend = () => {
-        console.log('Native speech synthesis finished')
-        setIsSpeaking(false)
-      }
-      utterance.onerror = () => {
-        console.log('Native speech synthesis error')
-        setIsSpeaking(false)
-      }
-
+      utterance.onend = handleEnd
+      utterance.onerror = handleEnd
       speechSynthesisRef.current = utterance
       window.speechSynthesis.speak(utterance)
+    } else {
+      handleEnd()
     }
   }
 
   const stopSpeaking = () => {
-    if (window.responsiveVoice) {
-      window.responsiveVoice.cancel()
-    } else {
-      window.speechSynthesis.cancel()
-    }
+    if (window.responsiveVoice) window.responsiveVoice.cancel()
+    else window.speechSynthesis?.cancel()
+    isSpeakingRef.current = false
     setIsSpeaking(false)
+    // Resume listening if it was on
+    if (isListeningRef.current && recognitionRef.current) {
+      recognitionRef.current.start()
+    }
   }
 
-  const handleSubmit = async () => {
-    if (!prompt.trim()) return
+  // ── ASR ───────────────────────────────────────────────────────────────────
 
+  const startRecognition = () => {
+    if (!SpeechRecognitionClass) return
+
+    const recognition = new SpeechRecognitionClass()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = 'en-US'
+
+    recognition.onresult = (e: ISpeechRecognitionEvent) => {
+      let interim = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i]
+        const text = result[0].transcript
+        if (result.isFinal) {
+          const trimmed = text.trim()
+          if (trimmed && shouldSubmit(trimmed)) void autoSubmit(trimmed)
+        } else {
+          interim += text
+        }
+      }
+      setLiveTranscript(interim)
+    }
+
+    // Auto-restart after silence — but not while TTS is playing
+    recognition.onend = () => {
+      if (isListeningRef.current && !isSpeakingRef.current) {
+        recognition.start()
+      }
+    }
+
+    recognition.onerror = () => {
+      if (isListeningRef.current && !isSpeakingRef.current) {
+        setTimeout(() => recognition.start(), 300)
+      }
+    }
+
+    recognitionRef.current = recognition
+    recognition.start()
+  }
+
+  const toggleListening = () => {
+    if (isListening) {
+      isListeningRef.current = false
+      recognitionRef.current?.stop()
+      setIsListening(false)
+      setLiveTranscript('')
+    } else {
+      isListeningRef.current = true
+      setIsListening(true)
+      startRecognition()
+    }
+  }
+
+  // M keybind toggles mic (ignored when focus is in a text field)
+  useEffect(() => {
+    if (!hasSpeech || !isOpen) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'm' && e.key !== 'M') return
+      const tag = (e.target as HTMLElement).tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      e.preventDefault()
+      toggleListening()
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [isOpen, isListening, hasSpeech])
+
+  // ── Submit helpers ────────────────────────────────────────────────────────
+
+  // Called automatically after each final ASR result
+  const autoSubmit = async (text: string) => {
+    setLastSubmitted(text)
+    setLiveTranscript('')
     setIsAnalyzing(true)
     setError(null)
     setExplanation(null)
+
+    // Pause recognition while fetching + speaking to avoid mic feedback loop
+    const wasListening = isListeningRef.current
+    if (wasListening && hasTTS) {
+      isSpeakingRef.current = true // blocks onend auto-restart
+      recognitionRef.current?.stop()
+    }
+
+    const restartIfNeeded = () => {
+      if (isListeningRef.current && recognitionRef.current) {
+        recognitionRef.current.start()
+      }
+    }
 
     try {
       const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt.trim() }),
+        body: JSON.stringify({ prompt: text }),
       })
 
       if (!res.ok) {
@@ -218,30 +250,56 @@ export function ClaudePanel({ isOpen, onClose }: ClaudePanelProps) {
       const data = (await res.json()) as { explanation?: string }
       const response = data.explanation ?? 'Done.'
       setExplanation(response)
-
-      console.log('About to call speakResponse with:', response)
-      console.log('hasSpeechSynthesis:', hasSpeechSynthesis)
-
-      // Speak the response instead of just displaying it
-      if (hasSpeechSynthesis) {
-        console.log('Calling speakResponse...')
-        speakResponse(response)
-      } else {
-        console.log('Speech synthesis not available')
-      }
+      speakResponse(response, wasListening && hasTTS ? restartIfNeeded : undefined)
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
       setError(errorMessage)
-      console.log('Error occurred, about to speak error:', errorMessage)
-      // Also speak errors
-      if (hasSpeechSynthesis) {
-        console.log('Speaking error message...')
-        speakResponse(`Error: ${errorMessage}`)
-      }
+      speakResponse(`Error: ${errorMessage}`, wasListening && hasTTS ? restartIfNeeded : undefined)
     } finally {
       setIsAnalyzing(false)
     }
   }
+
+  // Called from manual textarea submit
+  const handleSubmit = async () => {
+    if (!manualPrompt.trim()) return
+
+    setIsAnalyzing(true)
+    setError(null)
+    setExplanation(null)
+
+    try {
+      const res = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: manualPrompt.trim() }),
+      })
+
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(data.error ?? `Request failed (${res.status})`)
+      }
+
+      const data = (await res.json()) as { explanation?: string }
+      const response = data.explanation ?? 'Done.'
+      setExplanation(response)
+      speakResponse(response)
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+      setError(errorMessage)
+      speakResponse(`Error: ${errorMessage}`)
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  const micStatus = isSpeaking
+    ? 'Claude is speaking…'
+    : isListening
+      ? liveTranscript || 'Listening…'
+      : 'Mic off'
 
   return (
     <div className={`claude-panel${isOpen ? '' : ' hidden'}`}>
@@ -253,11 +311,34 @@ export function ClaudePanel({ isOpen, onClose }: ClaudePanelProps) {
       </div>
 
       <div className="claude-panel-body">
+        {hasSpeech && (
+          <div className="claude-voice-section">
+            <button
+              className={`claude-mic-btn${isListening ? ' listening' : ''}`}
+              onClick={toggleListening}
+              disabled={isSpeaking}
+              title={isListening ? 'Stop listening (M)' : 'Start listening (M)'}
+            >
+              🎤
+            </button>
+            <span className="claude-mic-status">{micStatus}</span>
+            {isSpeaking && (
+              <button className="claude-stop-btn" onClick={stopSpeaking} title="Stop speaking">
+                ⏹
+              </button>
+            )}
+          </div>
+        )}
+
+        {lastSubmitted && (
+          <div className="claude-submitted">You: {lastSubmitted}</div>
+        )}
+
         <textarea
           className="claude-prompt"
           placeholder="Describe what to draw, or ask about the canvas…"
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
+          value={manualPrompt}
+          onChange={(e) => setManualPrompt(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void handleSubmit()
           }}
@@ -265,36 +346,18 @@ export function ClaudePanel({ isOpen, onClose }: ClaudePanelProps) {
         />
 
         <div className="claude-actions">
-          {hasSpeech && (
-            <button
-              className={`claude-mic-btn${isListening ? ' listening' : ''}`}
-              onClick={() => (isListening ? stopListening() : startListening())}
-              disabled={isAnalyzing || isSpeaking}
-              title={isListening ? 'Stop recording' : 'Speak prompt'}
-            >
-              🎤
-            </button>
-          )}
           <button
             className="claude-submit-btn"
             onClick={() => void handleSubmit()}
-            disabled={isAnalyzing || !prompt.trim() || isSpeaking}
+            disabled={isAnalyzing || !manualPrompt.trim() || isSpeaking}
           >
-            {isAnalyzing ? 'Thinking…' : isSpeaking ? 'Claude is speaking…' : 'Ask Claude →'}
+            {isAnalyzing ? 'Thinking…' : isSpeaking ? 'Speaking…' : 'Ask Claude →'}
           </button>
         </div>
 
-        {isSpeaking && (
-          <div className="claude-response claude-speaking">
-            <strong>Claude is speaking...</strong> 🔊
-            <br />
-            <small>Click the mute button to stop</small>
-          </div>
-        )}
-
-        {!isSpeaking && explanation && (
-          <div className="claude-response">
-            <strong>Claude:</strong> {explanation}
+        {explanation && (
+          <div className={`claude-response${isSpeaking ? ' claude-speaking' : ''}`}>
+            <strong>Claude:</strong> {explanation} {isSpeaking && '🔊'}
           </div>
         )}
 

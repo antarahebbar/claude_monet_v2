@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 export interface AIElement {
+  id?: string;       // required for deleteElement / updateElement
   type: string;
   x: number;
   y: number;
@@ -18,7 +19,7 @@ export interface AIElement {
 }
 
 export interface AIAction {
-  action: 'addShape' | 'addArrow' | 'addText' | 'updateElement';
+  action: 'addShape' | 'addArrow' | 'addText' | 'updateElement' | 'deleteElement';
   element: AIElement;
 }
 
@@ -55,6 +56,10 @@ RESPONSE SCHEMA (return exactly this shape):
     {
       "action": "addArrow",
       "element": { "type": "arrow", "x": 300, "y": 140, "points": [[0, 0], [150, 0]], "strokeColor": "#000000", "strokeWidth": 2, "endArrowhead": "arrow" }
+    },
+    {
+      "action": "deleteElement",
+      "element": { "id": "abc123" }
     }
   ]
 }
@@ -63,6 +68,7 @@ AVAILABLE ACTIONS:
 - addShape: adds a rectangle, ellipse, or diamond. Required: type, x, y, width, height.
 - addText: adds a text label. Required: type="text", x, y, text, fontSize.
 - addArrow: adds a directional arrow. Required: type="arrow", x, y, points (array of [x,y] offsets).
+- deleteElement: removes an existing element by id. Required: id (from the canvas element data). No other fields needed.
 
 STYLING GUIDE (use color with intent):
 - Blue  — new component or system box: strokeColor "#1971c2", backgroundColor "#e7f5ff"

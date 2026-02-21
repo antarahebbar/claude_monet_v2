@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-import { ClaudePanel } from "./ClaudePanel";
 import {
   Excalidraw,
   convertToExcalidrawElements,
@@ -18,6 +17,51 @@ import {
   DEFAULT_MERMAID_CONFIG,
 } from "./utils/mermaidConverter";
 import type { MermaidConfig } from "@excalidraw/mermaid-to-excalidraw";
+
+// ── Speech recognition types ──────────────────────────────────
+interface ISpeechRecognition extends EventTarget {
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  start(): void
+  stop(): void
+  onresult: ((e: ISpeechRecognitionEvent) => void) | null
+  onend: (() => void) | null
+  onerror: (() => void) | null
+}
+interface ISpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList
+  resultIndex: number
+}
+type SpeechRecognitionCtor = new () => ISpeechRecognition
+interface ResponsiveVoice {
+  speak: (text: string, voice: string, options?: { pitch?: number; rate?: number; volume?: number; onstart?: () => void; onend?: () => void; onerror?: () => void }) => void
+  cancel: () => void
+  isPlaying: () => boolean
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition?: SpeechRecognitionCtor
+    webkitSpeechRecognition?: SpeechRecognitionCtor
+    responsiveVoice?: ResponsiveVoice
+  }
+}
+const FILLER_WORDS = new Set([
+  'um', 'uh', 'hmm', 'hm', 'ah', 'er', 'okay', 'ok',
+  'mhm', 'mmm', 'mm', 'yeah', 'yep', 'nope',
+])
+function shouldSubmit(text: string): boolean {
+  const words = text.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const meaningful = words.filter((w) => !FILLER_WORDS.has(w))
+  return meaningful.length >= 2
+}
+
+interface ChatMessage {
+  role: 'user' | 'claude'
+  text: string
+  ts: number
+}
 
 // Type definitions
 type ExcalidrawAPIRefValue = ExcalidrawImperativeAPI;
@@ -152,8 +196,24 @@ function App(): JSX.Element {
   const [excalidrawAPI, setExcalidrawAPI] =
     useState<ExcalidrawAPIRefValue | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [isPanelOpen, setIsPanelOpen] = useState(false);
   const websocketRef = useRef<WebSocket | null>(null);
+
+  // Mic / voice state
+  const SpeechRecognitionClass: SpeechRecognitionCtor | undefined =
+    window.SpeechRecognition ?? window.webkitSpeechRecognition
+  const hasSpeech = !!SpeechRecognitionClass
+  const hasTTS = !!window.responsiveVoice || !!window.speechSynthesis
+  const [isListening, setIsListening] = useState(false)
+  const [isSpeaking, setIsSpeaking] = useState(false)
+  const [liveTranscript, setLiveTranscript] = useState('')
+  const isListeningRef = useRef(false)
+  const isSpeakingRef = useRef(false)
+  const recognitionRef = useRef<ISpeechRecognition | null>(null)
+  const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
+
+  // Chat history
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
+  const chatEndRef = useRef<HTMLDivElement | null>(null)
 
   // Sync state management
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
@@ -165,6 +225,155 @@ function App(): JSX.Element {
   // Double-space clear functionality
   const lastSpacePressRef = useRef<number>(0)
   const DOUBLE_SPACE_DELAY = 300 // milliseconds
+
+  // ── TTS ────────────────────────────────────────────────────
+  const speakResponse = (text: string, onDone?: () => void) => {
+    let settled = false
+    const handleEnd = () => {
+      if (settled) return
+      settled = true
+      isSpeakingRef.current = false
+      setIsSpeaking(false)
+      onDone?.()
+    }
+    // Safety timeout: always unblock mic after estimated speech duration + 2s buffer
+    const estimatedMs = Math.max(3000, (text.length / 15) * 1000 + 2000)
+    const fallbackTimer = setTimeout(handleEnd, estimatedMs)
+
+    isSpeakingRef.current = true
+    setIsSpeaking(true)
+    if (window.responsiveVoice) {
+      window.responsiveVoice.cancel()
+      window.responsiveVoice.speak(text, 'UK English Female', {
+        pitch: 1.2, rate: 0.8, volume: 1.0,
+        onend: () => { clearTimeout(fallbackTimer); handleEnd() },
+        onerror: () => { clearTimeout(fallbackTimer); handleEnd() },
+      })
+    } else if (window.speechSynthesis) {
+      window.speechSynthesis.cancel()
+      const utterance = new SpeechSynthesisUtterance(text)
+      utterance.rate = 0.8; utterance.pitch = 1.15; utterance.volume = 1.0
+      utterance.onend = () => { clearTimeout(fallbackTimer); handleEnd() }
+      utterance.onerror = () => { clearTimeout(fallbackTimer); handleEnd() }
+      speechSynthesisRef.current = utterance
+      window.speechSynthesis.speak(utterance)
+    } else {
+      clearTimeout(fallbackTimer)
+      handleEnd()
+    }
+  }
+
+  const stopSpeaking = () => {
+    if (window.responsiveVoice) window.responsiveVoice.cancel()
+    else window.speechSynthesis?.cancel()
+    isSpeakingRef.current = false
+    setIsSpeaking(false)
+    if (isListeningRef.current && recognitionRef.current) {
+      recognitionRef.current.start()
+    }
+  }
+
+  // ── Mic logic ──────────────────────────────────────────────
+  const autoSubmitVoice = async (text: string) => {
+    setChatHistory((h) => [...h, { role: 'user', text, ts: Date.now() }])
+    setLiveTranscript('') // clear only after adding to history
+    const wasListening = isListeningRef.current
+    if (wasListening && hasTTS) {
+      isSpeakingRef.current = true
+      recognitionRef.current?.stop()
+    }
+    const restartIfNeeded = () => {
+      if (isListeningRef.current && recognitionRef.current) {
+        recognitionRef.current.start()
+      }
+    }
+    try {
+      const res = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: text }),
+      })
+      const data = await res.json() as { explanation?: string }
+      if (data.explanation) {
+        setChatHistory((h) => [...h, { role: 'claude', text: data.explanation!, ts: Date.now() }])
+        speakResponse(data.explanation, wasListening && hasTTS ? restartIfNeeded : undefined)
+      } else if (wasListening && hasTTS) {
+        isSpeakingRef.current = false
+        restartIfNeeded()
+      }
+    } catch (err) {
+      console.error('Voice submit error:', err)
+      if (wasListening && hasTTS) {
+        isSpeakingRef.current = false
+        restartIfNeeded()
+      }
+    }
+  }
+
+  const startRecognition = () => {
+    if (!SpeechRecognitionClass) return
+    const recognition = new SpeechRecognitionClass()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = 'en-US'
+    recognition.onresult = (e: ISpeechRecognitionEvent) => {
+      let interim = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i]
+        const text = result[0].transcript
+        if (result.isFinal) {
+          const trimmed = text.trim()
+          if (trimmed && shouldSubmit(trimmed)) {
+            setLiveTranscript(trimmed) // keep visible until moved to history
+            void autoSubmitVoice(trimmed)
+          }
+        } else {
+          interim += text
+        }
+      }
+      if (interim) setLiveTranscript(interim)
+    }
+    recognition.onend = () => {
+      if (isListeningRef.current && !isSpeakingRef.current) recognition.start()
+    }
+    recognition.onerror = () => {
+      if (isListeningRef.current && !isSpeakingRef.current) setTimeout(() => recognition.start(), 300)
+    }
+    recognitionRef.current = recognition
+    recognition.start()
+  }
+
+  const toggleListening = () => {
+    if (!hasSpeech) return
+    if (isListening) {
+      isListeningRef.current = false
+      recognitionRef.current?.stop()
+      setIsListening(false)
+      setLiveTranscript('')
+    } else {
+      isListeningRef.current = true
+      setIsListening(true)
+      startRecognition()
+    }
+  }
+
+  // M keybind toggles mic (skips input/textarea focus)
+  useEffect(() => {
+    if (!hasSpeech) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'm' && e.key !== 'M') return
+      const tag = (e.target as HTMLElement).tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      e.preventDefault()
+      toggleListening()
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [isListening, hasSpeech])
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatHistory])
 
   // WebSocket connection
   useEffect(() => {
@@ -806,12 +1015,16 @@ function App(): JSX.Element {
             </div>
 
             <button
-              className="mic-toggle-fab"
+              className={`mic-toggle-fab${isListening ? ' listening' : ''}`}
               type="button"
               aria-label="Toggle microphone"
-              onClick={() => setIsPanelOpen((o) => !o)}
+              onClick={isSpeaking ? stopSpeaking : toggleListening}
+              disabled={!hasSpeech}
+              title={hasSpeech ? (isSpeaking ? 'Stop speaking' : isListening ? 'Mic on — click to stop (M)' : 'Click to start mic (M)') : 'Speech not supported in this browser'}
             >
-              <span className="mic-toggle-label">Ask Claude</span>
+              <span className="mic-toggle-label">
+                {isSpeaking ? 'Speaking… ⏹' : isListening ? (liveTranscript || 'Listening…') : 'Ask Claude'}
+              </span>
               <span className="mic-switch" aria-hidden="true">
                 <span className="mic-switch-thumb"></span>
               </span>
@@ -820,20 +1033,47 @@ function App(): JSX.Element {
         </div>
       </div>
 
-      <ClaudePanel isOpen={isPanelOpen} onClose={() => setIsPanelOpen(false)} />
+      <div className="main-content">
+        <div className="canvas-container">
+          <Excalidraw
+            excalidrawAPI={(api: ExcalidrawAPIRefValue) => setExcalidrawAPI(api)}
+            onChange={handleCanvasChange}
+            initialData={{
+              elements: [],
+              appState: {
+                theme: "light",
+                viewBackgroundColor: "#ffffff",
+              },
+            }}
+          />
+        </div>
 
-      <div className="canvas-container">
-        <Excalidraw
-          excalidrawAPI={(api: ExcalidrawAPIRefValue) => setExcalidrawAPI(api)}
-          onChange={handleCanvasChange}
-          initialData={{
-            elements: [],
-            appState: {
-              theme: "light",
-              viewBackgroundColor: "#ffffff",
-            },
-          }}
-        />
+        <div className="chat-sidebar">
+          <div className="chat-sidebar-header">
+            <span>Chat</span>
+            {chatHistory.length > 0 && (
+              <button className="chat-clear-btn" onClick={() => setChatHistory([])}>Clear</button>
+            )}
+          </div>
+          <div className="chat-messages">
+            {chatHistory.length === 0 && !liveTranscript && (
+              <p className="chat-empty">Voice messages will appear here.</p>
+            )}
+            {chatHistory.map((msg) => (
+              <div key={msg.ts} className={`chat-msg chat-msg-${msg.role}`}>
+                <span className="chat-msg-role">{msg.role === 'user' ? 'You' : 'Claude'}</span>
+                <p className="chat-msg-text">{msg.text}</p>
+              </div>
+            ))}
+            {liveTranscript && (
+              <div className="chat-msg chat-msg-live">
+                <span className="chat-msg-role">You</span>
+                <p className="chat-msg-text chat-msg-text-live">{liveTranscript}</p>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+        </div>
       </div>
     </div>
   );
