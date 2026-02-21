@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-import { ClaudePanel } from "./ClaudePanel";
 import {
   Excalidraw,
   convertToExcalidrawElements,
@@ -18,6 +17,45 @@ import {
   DEFAULT_MERMAID_CONFIG,
 } from "./utils/mermaidConverter";
 import type { MermaidConfig } from "@excalidraw/mermaid-to-excalidraw";
+
+// ── Speech recognition types ──────────────────────────────────
+interface ISpeechRecognition extends EventTarget {
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  start(): void
+  stop(): void
+  onresult: ((e: ISpeechRecognitionEvent) => void) | null
+  onend: (() => void) | null
+  onerror: (() => void) | null
+}
+interface ISpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList
+  resultIndex: number
+}
+type SpeechRecognitionCtor = new () => ISpeechRecognition
+interface ResponsiveVoice {
+  speak: (text: string, voice: string, options?: { pitch?: number; rate?: number; volume?: number; onstart?: () => void; onend?: () => void; onerror?: () => void }) => void
+  cancel: () => void
+  isPlaying: () => boolean
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition?: SpeechRecognitionCtor
+    webkitSpeechRecognition?: SpeechRecognitionCtor
+    responsiveVoice?: ResponsiveVoice
+  }
+}
+const FILLER_WORDS = new Set([
+  'um', 'uh', 'hmm', 'hm', 'ah', 'er', 'okay', 'ok',
+  'mhm', 'mmm', 'mm', 'yeah', 'yep', 'nope',
+])
+function shouldSubmit(text: string): boolean {
+  const words = text.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const meaningful = words.filter((w) => !FILLER_WORDS.has(w))
+  return meaningful.length >= 2
+}
 
 // Type definitions
 type ExcalidrawAPIRefValue = ExcalidrawImperativeAPI;
@@ -152,8 +190,20 @@ function App(): JSX.Element {
   const [excalidrawAPI, setExcalidrawAPI] =
     useState<ExcalidrawAPIRefValue | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [isPanelOpen, setIsPanelOpen] = useState(false);
   const websocketRef = useRef<WebSocket | null>(null);
+
+  // Mic / voice state
+  const SpeechRecognitionClass: SpeechRecognitionCtor | undefined =
+    window.SpeechRecognition ?? window.webkitSpeechRecognition
+  const hasSpeech = !!SpeechRecognitionClass
+  const hasTTS = !!window.responsiveVoice || !!window.speechSynthesis
+  const [isListening, setIsListening] = useState(false)
+  const [isSpeaking, setIsSpeaking] = useState(false)
+  const [liveTranscript, setLiveTranscript] = useState('')
+  const isListeningRef = useRef(false)
+  const isSpeakingRef = useRef(false)
+  const recognitionRef = useRef<ISpeechRecognition | null>(null)
+  const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
 
   // Sync state management
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
@@ -161,6 +211,156 @@ function App(): JSX.Element {
 
   // Auto-sync debouncing
   const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // ── TTS ────────────────────────────────────────────────────
+  const speakResponse = (text: string, onDone?: () => void) => {
+    const handleEnd = () => {
+      isSpeakingRef.current = false
+      setIsSpeaking(false)
+      onDone?.()
+    }
+    isSpeakingRef.current = true
+    setIsSpeaking(true)
+    if (window.responsiveVoice) {
+      window.responsiveVoice.cancel()
+      window.responsiveVoice.speak(text, 'UK English Female', {
+        pitch: 1.2, rate: 0.8, volume: 1.0, onend: handleEnd, onerror: handleEnd,
+      })
+    } else if (window.speechSynthesis) {
+      window.speechSynthesis.cancel()
+      const utterance = new SpeechSynthesisUtterance(text)
+      utterance.rate = 0.8; utterance.pitch = 1.15; utterance.volume = 1.0
+      utterance.onend = handleEnd; utterance.onerror = handleEnd
+      speechSynthesisRef.current = utterance
+      window.speechSynthesis.speak(utterance)
+    } else {
+      handleEnd()
+    }
+  }
+
+  const stopSpeaking = () => {
+    if (window.responsiveVoice) window.responsiveVoice.cancel()
+    else window.speechSynthesis?.cancel()
+    isSpeakingRef.current = false
+    setIsSpeaking(false)
+    if (isListeningRef.current && recognitionRef.current) {
+      recognitionRef.current.start()
+    }
+  }
+
+  // ── Mic logic ──────────────────────────────────────────────
+  const autoSubmitVoice = async (text: string) => {
+    setLiveTranscript('')
+    const wasListening = isListeningRef.current
+    if (wasListening && hasTTS) {
+      isSpeakingRef.current = true
+      recognitionRef.current?.stop()
+    }
+    const restartIfNeeded = () => {
+      if (isListeningRef.current && recognitionRef.current) {
+        recognitionRef.current.start()
+      }
+    }
+    try {
+      const res = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: text }),
+      })
+      const data = await res.json() as { explanation?: string }
+      if (data.explanation) {
+        speakResponse(data.explanation, wasListening && hasTTS ? restartIfNeeded : undefined)
+      } else if (wasListening && hasTTS) {
+        isSpeakingRef.current = false
+        restartIfNeeded()
+      }
+    } catch (err) {
+      console.error('Voice submit error:', err)
+      if (wasListening && hasTTS) {
+        isSpeakingRef.current = false
+        restartIfNeeded()
+      }
+    }
+  }
+
+  const startRecognition = () => {
+    if (!SpeechRecognitionClass) return
+    const recognition = new SpeechRecognitionClass()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = 'en-US'
+    recognition.onresult = (e: ISpeechRecognitionEvent) => {
+      let interim = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i]
+        if (result.isFinal) {
+          const trimmed = result[0].transcript.trim()
+          if (trimmed && shouldSubmit(trimmed)) void autoSubmitVoice(trimmed)
+        } else {
+          interim += result[0].transcript
+        }
+      }
+      setLiveTranscript(interim)
+    }
+    recognition.onend = () => {
+      if (isListeningRef.current && !isSpeakingRef.current) recognition.start()
+    }
+    recognition.onerror = () => {
+      if (isListeningRef.current && !isSpeakingRef.current) setTimeout(() => recognition.start(), 300)
+    }
+    recognitionRef.current = recognition
+    recognition.start()
+  }
+
+  const toggleListening = () => {
+    if (!hasSpeech) return
+    if (isListening) {
+      isListeningRef.current = false
+      recognitionRef.current?.stop()
+      setIsListening(false)
+      setLiveTranscript('')
+    } else {
+      isListeningRef.current = true
+      setIsListening(true)
+      startRecognition()
+    }
+  }
+
+  // M keybind toggles mic (skips input/textarea focus)
+  useEffect(() => {
+    if (!hasSpeech) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'm' && e.key !== 'M') return
+      const tag = (e.target as HTMLElement).tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      e.preventDefault()
+      toggleListening()
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [isListening, hasSpeech])
+
+  // M key shortcut to toggle mic
+  useEffect(() => {
+    if (!hasSpeech) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'm' && e.key !== 'M') return
+      const tag = (e.target as HTMLElement).tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      e.preventDefault()
+      if (isListeningRef.current) {
+        isListeningRef.current = false
+        recognitionRef.current?.stop()
+        setIsListening(false)
+      } else {
+        isListeningRef.current = true
+        setIsListening(true)
+        startRecognition()
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [hasSpeech])
 
   // WebSocket connection
   useEffect(() => {
@@ -768,12 +968,16 @@ function App(): JSX.Element {
             </div>
 
             <button
-              className="mic-toggle-fab"
+              className={`mic-toggle-fab${isListening ? ' listening' : ''}`}
               type="button"
               aria-label="Toggle microphone"
-              onClick={() => setIsPanelOpen((o) => !o)}
+              onClick={isSpeaking ? stopSpeaking : toggleListening}
+              disabled={!hasSpeech}
+              title={hasSpeech ? (isSpeaking ? 'Stop speaking' : isListening ? 'Mic on — click to stop (M)' : 'Click to start mic (M)') : 'Speech not supported in this browser'}
             >
-              <span className="mic-toggle-label">Ask Claude</span>
+              <span className="mic-toggle-label">
+                {isSpeaking ? 'Speaking… ⏹' : isListening ? (liveTranscript || 'Listening…') : 'Ask Claude'}
+              </span>
               <span className="mic-switch" aria-hidden="true">
                 <span className="mic-switch-thumb"></span>
               </span>
@@ -781,8 +985,6 @@ function App(): JSX.Element {
           </div>
         </div>
       </div>
-
-      <ClaudePanel isOpen={isPanelOpen} onClose={() => setIsPanelOpen(false)} />
 
       <div className="canvas-container">
         <Excalidraw

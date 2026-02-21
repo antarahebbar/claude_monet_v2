@@ -1114,9 +1114,20 @@ app.post('/api/analyze', async (req: Request, res: Response) => {
     const canvasElements = Array.from(elements.values());
     const aiResponse = await visionService.generateActions(prompt, canvasElements);
 
+    // Process deleteElement actions first
+    const deleteActions = aiResponse.actions.filter((a: AIAction) => a.action === 'deleteElement');
+    for (const a of deleteActions) {
+      const targetId = (a.element as any).id as string | undefined;
+      if (targetId && elements.has(targetId)) {
+        elements.delete(targetId);
+        const deleteMsg: ElementDeletedMessage = { type: 'element_deleted', elementId: targetId };
+        broadcast(deleteMsg);
+      }
+    }
+
     // Map AI actions to v2 element schema and batch create
     const elementsToCreate = aiResponse.actions
-      .filter((a: AIAction) => a.action !== 'updateElement')
+      .filter((a: AIAction) => a.action !== 'updateElement' && a.action !== 'deleteElement')
       .map((a: AIAction) => {
         const el = a.element as any;
         if (a.action === 'addArrow') {
