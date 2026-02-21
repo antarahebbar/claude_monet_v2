@@ -500,6 +500,28 @@
             50% { transform: scale(1.1); }
         }
 
+        .claude-voice-section {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .claude-mic-status {
+            flex: 1;
+            font-size: 12px;
+            font-style: italic;
+            color: #888;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .claude-submitted {
+            font-size: 12px;
+            font-style: italic;
+            color: #aaa;
+        }
+
         @media (max-width: 900px) {
             .app {
                 padding: 0.75rem;
