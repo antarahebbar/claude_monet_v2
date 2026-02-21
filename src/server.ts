@@ -1101,18 +1101,18 @@ app.get('/', (req: Request, res: Response) => {
   });
 });
 
-// AI Vision turn: canvas PNG + voice/text prompt → Claude → drawing actions applied to canvas
-// Body: { image: string (base64 PNG), prompt: string }
+// AI canvas turn: canvas element data + text prompt → Claude → drawing actions applied to canvas
+// Body: { prompt: string }
 app.post('/api/analyze', async (req: Request, res: Response) => {
   try {
-    const { image, prompt } = req.body as { image: string; prompt: string };
+    const { prompt } = req.body as { prompt: string };
 
-    if (!image || !prompt) {
-      return res.status(400).json({ success: false, error: 'image and prompt are required' });
+    if (!prompt) {
+      return res.status(400).json({ success: false, error: 'prompt is required' });
     }
 
-    const imageBuffer = Buffer.from(image, 'base64');
-    const aiResponse = await visionService.generateActions(prompt, imageBuffer);
+    const canvasElements = Array.from(elements.values());
+    const aiResponse = await visionService.generateActions(prompt, canvasElements);
 
     // Map AI actions to v2 element schema and batch create
     const elementsToCreate = aiResponse.actions
