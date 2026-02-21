@@ -57,6 +57,12 @@ function shouldSubmit(text: string): boolean {
   return meaningful.length >= 2
 }
 
+interface ChatMessage {
+  role: 'user' | 'claude'
+  text: string
+  ts: number
+}
+
 // Type definitions
 type ExcalidrawAPIRefValue = ExcalidrawImperativeAPI;
 
@@ -205,6 +211,10 @@ function App(): JSX.Element {
   const recognitionRef = useRef<ISpeechRecognition | null>(null)
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
 
+  // Chat history
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
+  const chatEndRef = useRef<HTMLDivElement | null>(null)
+
   // Sync state management
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
@@ -251,6 +261,7 @@ function App(): JSX.Element {
   // ── Mic logic ──────────────────────────────────────────────
   const autoSubmitVoice = async (text: string) => {
     setLiveTranscript('')
+    setChatHistory((h) => [...h, { role: 'user', text, ts: Date.now() }])
     const wasListening = isListeningRef.current
     if (wasListening && hasTTS) {
       isSpeakingRef.current = true
@@ -269,6 +280,7 @@ function App(): JSX.Element {
       })
       const data = await res.json() as { explanation?: string }
       if (data.explanation) {
+        setChatHistory((h) => [...h, { role: 'claude', text: data.explanation!, ts: Date.now() }])
         speakResponse(data.explanation, wasListening && hasTTS ? restartIfNeeded : undefined)
       } else if (wasListening && hasTTS) {
         isSpeakingRef.current = false
@@ -340,27 +352,9 @@ function App(): JSX.Element {
     return () => document.removeEventListener('keydown', handler)
   }, [isListening, hasSpeech])
 
-  // M key shortcut to toggle mic
   useEffect(() => {
-    if (!hasSpeech) return
-    const handler = (e: KeyboardEvent) => {
-      if (e.key !== 'm' && e.key !== 'M') return
-      const tag = (e.target as HTMLElement).tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return
-      e.preventDefault()
-      if (isListeningRef.current) {
-        isListeningRef.current = false
-        recognitionRef.current?.stop()
-        setIsListening(false)
-      } else {
-        isListeningRef.current = true
-        setIsListening(true)
-        startRecognition()
-      }
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [hasSpeech])
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatHistory])
 
   // WebSocket connection
   useEffect(() => {
@@ -986,18 +980,47 @@ function App(): JSX.Element {
         </div>
       </div>
 
-      <div className="canvas-container">
-        <Excalidraw
-          excalidrawAPI={(api: ExcalidrawAPIRefValue) => setExcalidrawAPI(api)}
-          onChange={handleCanvasChange}
-          initialData={{
-            elements: [],
-            appState: {
-              theme: "light",
-              viewBackgroundColor: "#ffffff",
-            },
-          }}
-        />
+      <div className="main-content">
+        <div className="canvas-container">
+          <Excalidraw
+            excalidrawAPI={(api: ExcalidrawAPIRefValue) => setExcalidrawAPI(api)}
+            onChange={handleCanvasChange}
+            initialData={{
+              elements: [],
+              appState: {
+                theme: "light",
+                viewBackgroundColor: "#ffffff",
+              },
+            }}
+          />
+        </div>
+
+        <div className="chat-sidebar">
+          <div className="chat-sidebar-header">
+            <span>Chat</span>
+            {chatHistory.length > 0 && (
+              <button className="chat-clear-btn" onClick={() => setChatHistory([])}>Clear</button>
+            )}
+          </div>
+          <div className="chat-messages">
+            {chatHistory.length === 0 && !liveTranscript && (
+              <p className="chat-empty">Voice messages will appear here.</p>
+            )}
+            {chatHistory.map((msg) => (
+              <div key={msg.ts} className={`chat-msg chat-msg-${msg.role}`}>
+                <span className="chat-msg-role">{msg.role === 'user' ? 'You' : 'Claude'}</span>
+                <p className="chat-msg-text">{msg.text}</p>
+              </div>
+            ))}
+            {liveTranscript && (
+              <div className="chat-msg chat-msg-live">
+                <span className="chat-msg-role">You</span>
+                <p className="chat-msg-text chat-msg-text-live">{liveTranscript}</p>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+        </div>
       </div>
     </div>
   );
