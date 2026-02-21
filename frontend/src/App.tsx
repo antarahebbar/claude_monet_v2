@@ -1024,16 +1024,27 @@ function App(): JSX.Element {
               </button>
             </div>
 
+            {isSpeaking && (
+              <button
+                className="mic-toggle-fab tts-stop-btn"
+                type="button"
+                aria-label="Stop speaking"
+                onClick={stopSpeaking}
+                title="Stop Claude speaking"
+              >
+                <span className="mic-toggle-label">Stop ⏹</span>
+              </button>
+            )}
             <button
               className={`mic-toggle-fab${isListening ? ' listening' : ''}`}
               type="button"
               aria-label="Toggle microphone"
-              onClick={isSpeaking ? stopSpeaking : toggleListening}
+              onClick={toggleListening}
               disabled={!hasSpeech}
-              title={hasSpeech ? (isSpeaking ? 'Stop speaking' : isListening ? 'Mic on — click to stop (M)' : 'Click to start mic (M)') : 'Speech not supported in this browser'}
+              title={hasSpeech ? (isListening ? 'Mic on — click to stop (M)' : 'Click to start mic (M)') : 'Speech not supported in this browser'}
             >
               <span className="mic-toggle-label">
-                {isSpeaking ? 'Stop ⏹' : isListening ? 'Listening…' : 'Ask Claude'}
+                {isListening ? 'Listening…' : 'Ask Claude'}
               </span>
               <span className="mic-switch" aria-hidden="true">
                 <span className="mic-switch-thumb"></span>
