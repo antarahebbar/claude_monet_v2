@@ -10,6 +10,16 @@ version: '3.8'
 # Most common: Run canvas locally, MCP via Claude Desktop config
 
 services:
+  # Redis - persistent canvas state
+  redis:
+    image: redis:7-alpine
+    container_name: claude-monet-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
   # Canvas server (optional) - Visual UI and REST API
   canvas:
     build:
