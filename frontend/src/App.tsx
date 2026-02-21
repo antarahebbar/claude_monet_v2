@@ -210,6 +210,7 @@ function App(): JSX.Element {
   const isSpeakingRef = useRef(false)
   const recognitionRef = useRef<ISpeechRecognition | null>(null)
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
+  const speakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Chat history
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
@@ -228,17 +229,21 @@ function App(): JSX.Element {
 
   // ── TTS ────────────────────────────────────────────────────
   const speakResponse = (text: string, onDone?: () => void) => {
+    // Clear any previous speak timer
+    if (speakTimerRef.current) clearTimeout(speakTimerRef.current)
+
     let settled = false
     const handleEnd = () => {
       if (settled) return
       settled = true
+      if (speakTimerRef.current) { clearTimeout(speakTimerRef.current); speakTimerRef.current = null }
       isSpeakingRef.current = false
       setIsSpeaking(false)
       onDone?.()
     }
     // Safety timeout: always unblock mic after estimated speech duration + 2s buffer
     const estimatedMs = Math.max(3000, (text.length / 15) * 1000 + 2000)
-    const fallbackTimer = setTimeout(handleEnd, estimatedMs)
+    speakTimerRef.current = setTimeout(handleEnd, estimatedMs)
 
     isSpeakingRef.current = true
     setIsSpeaking(true)
@@ -246,31 +251,36 @@ function App(): JSX.Element {
       window.responsiveVoice.cancel()
       window.responsiveVoice.speak(text, 'UK English Female', {
         pitch: 1.2, rate: 0.8, volume: 1.0,
-        onend: () => { clearTimeout(fallbackTimer); handleEnd() },
-        onerror: () => { clearTimeout(fallbackTimer); handleEnd() },
+        onend: handleEnd,
+        onerror: handleEnd,
       })
     } else if (window.speechSynthesis) {
       window.speechSynthesis.cancel()
       const utterance = new SpeechSynthesisUtterance(text)
       utterance.rate = 0.8; utterance.pitch = 1.15; utterance.volume = 1.0
-      utterance.onend = () => { clearTimeout(fallbackTimer); handleEnd() }
-      utterance.onerror = () => { clearTimeout(fallbackTimer); handleEnd() }
+      utterance.onend = handleEnd
+      utterance.onerror = handleEnd
       speechSynthesisRef.current = utterance
       window.speechSynthesis.speak(utterance)
     } else {
-      clearTimeout(fallbackTimer)
       handleEnd()
     }
   }
 
   const stopSpeaking = () => {
+    // Cancel audio
     if (window.responsiveVoice) window.responsiveVoice.cancel()
     else window.speechSynthesis?.cancel()
+    // Clear safety timer and reset state immediately
+    if (speakTimerRef.current) { clearTimeout(speakTimerRef.current); speakTimerRef.current = null }
     isSpeakingRef.current = false
     setIsSpeaking(false)
-    if (isListeningRef.current && recognitionRef.current) {
-      recognitionRef.current.start()
-    }
+    // Restart recognition if mic was on (guard against double-start from onend)
+    setTimeout(() => {
+      if (isListeningRef.current && recognitionRef.current) {
+        try { recognitionRef.current.start() } catch (_) { /* already running */ }
+      }
+    }, 50)
   }
 
   // ── Mic logic ──────────────────────────────────────────────
@@ -1023,7 +1033,7 @@ function App(): JSX.Element {
               title={hasSpeech ? (isSpeaking ? 'Stop speaking' : isListening ? 'Mic on — click to stop (M)' : 'Click to start mic (M)') : 'Speech not supported in this browser'}
             >
               <span className="mic-toggle-label">
-                {isSpeaking ? 'Speaking… ⏹' : isListening ? (liveTranscript || 'Listening…') : 'Ask Claude'}
+                {isSpeaking ? 'Stop ⏹' : isListening ? 'Listening…' : 'Ask Claude'}
               </span>
               <span className="mic-switch" aria-hidden="true">
                 <span className="mic-switch-thumb"></span>

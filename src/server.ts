@@ -1142,12 +1142,22 @@ app.post('/api/analyze', async (req: Request, res: Response) => {
             startArrowhead: el.startArrowhead ?? null,
           };
         }
+        // Auto-size text elements so they never clip
+        const fontSize = el.fontSize ?? 16;
+        const isText = (el.type ?? 'rectangle') === 'text';
+        const textWidth = isText && el.text
+          ? Math.max(200, Math.ceil(el.text.length * fontSize * 0.6))
+          : el.width;
+        const textHeight = isText
+          ? Math.max(fontSize * 2, el.height ?? 0)
+          : el.height;
+
         return {
           type: el.type ?? 'rectangle',
           x: el.x ?? 0,
           y: el.y ?? 0,
-          width: el.width,
-          height: el.height,
+          width: isText ? textWidth : el.width,
+          height: isText ? textHeight : el.height,
           text: el.text,
           fontSize: el.fontSize,
           strokeColor: el.strokeColor,
