@@ -766,9 +766,15 @@ function App(): JSX.Element {
             </div>
 
             <button
-              className="mic-toggle-fab"
+              className={`mic-toggle-fab ${isPanelOpen ? "active" : ""}`}
               type="button"
+<<<<<<< Updated upstream
               aria-label="Toggle microphone"
+=======
+              aria-label="Toggle Ask Claude panel"
+              aria-pressed={isPanelOpen}
+              onClick={() => setIsPanelOpen((o) => !o)}
+>>>>>>> Stashed changes
             >
               <span className="mic-toggle-label">Toggle Mic</span>
               <span className="mic-switch" aria-hidden="true">
