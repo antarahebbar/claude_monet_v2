@@ -224,26 +224,37 @@ function App(): JSX.Element {
 
   // ── TTS ────────────────────────────────────────────────────
   const speakResponse = (text: string, onDone?: () => void) => {
+    let settled = false
     const handleEnd = () => {
+      if (settled) return
+      settled = true
       isSpeakingRef.current = false
       setIsSpeaking(false)
       onDone?.()
     }
+    // Safety timeout: always unblock mic after estimated speech duration + 2s buffer
+    const estimatedMs = Math.max(3000, (text.length / 15) * 1000 + 2000)
+    const fallbackTimer = setTimeout(handleEnd, estimatedMs)
+
     isSpeakingRef.current = true
     setIsSpeaking(true)
     if (window.responsiveVoice) {
       window.responsiveVoice.cancel()
       window.responsiveVoice.speak(text, 'UK English Female', {
-        pitch: 1.2, rate: 0.8, volume: 1.0, onend: handleEnd, onerror: handleEnd,
+        pitch: 1.2, rate: 0.8, volume: 1.0,
+        onend: () => { clearTimeout(fallbackTimer); handleEnd() },
+        onerror: () => { clearTimeout(fallbackTimer); handleEnd() },
       })
     } else if (window.speechSynthesis) {
       window.speechSynthesis.cancel()
       const utterance = new SpeechSynthesisUtterance(text)
       utterance.rate = 0.8; utterance.pitch = 1.15; utterance.volume = 1.0
-      utterance.onend = handleEnd; utterance.onerror = handleEnd
+      utterance.onend = () => { clearTimeout(fallbackTimer); handleEnd() }
+      utterance.onerror = () => { clearTimeout(fallbackTimer); handleEnd() }
       speechSynthesisRef.current = utterance
       window.speechSynthesis.speak(utterance)
     } else {
+      clearTimeout(fallbackTimer)
       handleEnd()
     }
   }
@@ -260,8 +271,8 @@ function App(): JSX.Element {
 
   // ── Mic logic ──────────────────────────────────────────────
   const autoSubmitVoice = async (text: string) => {
-    setLiveTranscript('')
     setChatHistory((h) => [...h, { role: 'user', text, ts: Date.now() }])
+    setLiveTranscript('') // clear only after adding to history
     const wasListening = isListeningRef.current
     if (wasListening && hasTTS) {
       isSpeakingRef.current = true
@@ -305,14 +316,18 @@ function App(): JSX.Element {
       let interim = ''
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const result = e.results[i]
+        const text = result[0].transcript
         if (result.isFinal) {
-          const trimmed = result[0].transcript.trim()
-          if (trimmed && shouldSubmit(trimmed)) void autoSubmitVoice(trimmed)
+          const trimmed = text.trim()
+          if (trimmed && shouldSubmit(trimmed)) {
+            setLiveTranscript(trimmed) // keep visible until moved to history
+            void autoSubmitVoice(trimmed)
+          }
         } else {
-          interim += result[0].transcript
+          interim += text
         }
       }
-      setLiveTranscript(interim)
+      if (interim) setLiveTranscript(interim)
     }
     recognition.onend = () => {
       if (isListeningRef.current && !isSpeakingRef.current) recognition.start()
