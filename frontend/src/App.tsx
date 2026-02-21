@@ -765,26 +765,6 @@ function App(): JSX.Element {
               </button>
             </div>
 
-            <div className="sync-status sync-pill">
-              {syncStatus === "success" && (
-                <span className="sync-success">Synced</span>
-              )}
-              {syncStatus === "error" && (
-                <span className="sync-error">Sync failed</span>
-              )}
-              {syncStatus === "syncing" && (
-                <span className="sync-time">Saving changes...</span>
-              )}
-              {lastSyncTime && syncStatus === "idle" && (
-                <span className="sync-time">
-                  Last sync {formatSyncTime(lastSyncTime)}
-                </span>
-              )}
-              {!lastSyncTime && syncStatus === "idle" && (
-                <span className="sync-time">No sync yet</span>
-              )}
-            </div>
-
             <button
               className="mic-toggle-fab"
               type="button"
