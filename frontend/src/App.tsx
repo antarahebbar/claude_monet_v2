@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { ClaudePanel } from "./ClaudePanel";
 import {
   Excalidraw,
   convertToExcalidrawElements,
@@ -151,6 +152,7 @@ function App(): JSX.Element {
   const [excalidrawAPI, setExcalidrawAPI] =
     useState<ExcalidrawAPIRefValue | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [isPanelOpen, setIsPanelOpen] = useState(false);
   const websocketRef = useRef<WebSocket | null>(null);
 
   // Sync state management
@@ -769,8 +771,9 @@ function App(): JSX.Element {
               className="mic-toggle-fab"
               type="button"
               aria-label="Toggle microphone"
+              onClick={() => setIsPanelOpen((o) => !o)}
             >
-              <span className="mic-toggle-label">Toggle Mic</span>
+              <span className="mic-toggle-label">Ask Claude</span>
               <span className="mic-switch" aria-hidden="true">
                 <span className="mic-switch-thumb"></span>
               </span>
@@ -778,6 +781,8 @@ function App(): JSX.Element {
           </div>
         </div>
       </div>
+
+      <ClaudePanel isOpen={isPanelOpen} onClose={() => setIsPanelOpen(false)} />
 
       <div className="canvas-container">
         <Excalidraw

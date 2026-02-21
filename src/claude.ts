@@ -29,12 +29,12 @@ export interface AIResponse {
 
 const SYSTEM_PROMPT = `You are Claude Monet — an AI visual thinking partner embedded in an Excalidraw collaborative whiteboard.
 
-Your role: analyze what the user has drawn, understand their intent, and respond by adding structured drawing actions back to the same canvas. You think and communicate visually.
+Your role: analyze the canvas element data provided, understand the user's intent, and respond by adding structured drawing actions back to the same canvas. You think and communicate visually.
 
 RULES:
 1. Return ONLY valid JSON — no markdown fences, no prose, no text outside the JSON object.
-2. Analyze the image carefully: identify shapes, text, arrows, diagrams, and their spatial relationships.
-3. Position new elements relative to existing content. Assume the canvas is approximately 1200x800 pixels. Place elements where they make visual sense — do not overlap existing content unless intentional.
+2. Analyze the canvas elements carefully: understand shapes, text, arrows, and their spatial relationships from the JSON data.
+3. Position new elements relative to existing content. Use the x/y coordinates from the existing elements to place new ones without overlapping unless intentional.
 4. Be additive and collaborative — build on what the user drew, clarify it, complete it. Do not replace or describe it.
 5. Keep responses focused: 3–10 actions maximum.
 6. Make assumptions explicit by adding short text labels.
@@ -89,7 +89,9 @@ export class ClaudeVisionService {
     });
   }
 
-  async generateActions(prompt: string, imageBuffer: Buffer): Promise<AIResponse> {
+  async generateActions(prompt: string, canvasElements: object[]): Promise<AIResponse> {
+    const elementsJson = JSON.stringify(canvasElements, null, 2);
+
     const response = await this.anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 4000,
@@ -99,16 +101,8 @@ export class ClaudeVisionService {
           role: 'user',
           content: [
             {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: 'image/png',
-                data: imageBuffer.toString('base64'),
-              },
-            },
-            {
               type: 'text',
-              text: `User request: ${prompt}`,
+              text: `Current canvas elements:\n\`\`\`json\n${elementsJson}\n\`\`\`\n\nUser request: ${prompt}`,
             },
           ],
         },
