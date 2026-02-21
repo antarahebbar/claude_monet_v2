@@ -760,15 +760,6 @@ function App(): JSX.Element {
             </div>
 
             <div className="sync-controls studio-actions">
-              <button
-                className={`btn-primary btn-pill ${syncStatus === "syncing" ? "btn-loading" : ""}`}
-                onClick={syncToBackend}
-                disabled={syncStatus === "syncing" || !excalidrawAPI}
-              >
-                {syncStatus === "syncing" && <span className="spinner"></span>}
-                {syncStatus === "syncing" ? "Syncing..." : "Sync to Backend"}
-              </button>
-
               <button className="btn-secondary btn-pill" onClick={clearCanvas}>
                 Clear Canvas
               </button>
