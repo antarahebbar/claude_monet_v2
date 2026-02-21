@@ -60,7 +60,7 @@ async function initializeServices(): Promise<void> {
     await redisMemory.connect();
     const currentElements = Array.from(elements.values());
     if (currentElements.length > 0) {
-      await redisMemory.storeDiagramState(currentElements);
+      await redisMemory.storeDiagramState(currentElements, true); // Force full update on initialization
       logger.info(`Initialized Redis with ${currentElements.length} existing elements`);
     }
 
@@ -232,9 +232,10 @@ app.post('/api/elements', async (req: Request, res: Response) => {
 
     elements.set(id, element);
 
-    // Update Redis memory
+    // Update Redis memory incrementally
+    await redisMemory.storeElement(element);
     const allElements = Array.from(elements.values());
-    await redisMemory.storeDiagramState(allElements);
+    await redisMemory.storeDiagramState(allElements, false); // Incremental update
     await redisMemory.logChange({
       type: 'created',
       timestamp: new Date().toISOString(),
@@ -292,9 +293,10 @@ app.put('/api/elements/:id', async (req: Request, res: Response) => {
 
     elements.set(id, updatedElement);
 
-    // Update Redis memory
+    // Update Redis memory incrementally
+    await redisMemory.storeElement(updatedElement);
     const allElements = Array.from(elements.values());
-    await redisMemory.storeDiagramState(allElements);
+    await redisMemory.storeDiagramState(allElements, false); // Incremental update
     await redisMemory.logChange({
       type: 'updated',
       timestamp: new Date().toISOString(),
@@ -328,8 +330,8 @@ app.delete('/api/elements/clear', async (req: Request, res: Response) => {
     const count = elements.size;
     elements.clear();
 
-    // Update Redis memory
-    await redisMemory.storeDiagramState([]);
+    // Update Redis memory (clear all)
+    await redisMemory.storeDiagramState([], true); // Force full clear
     await redisMemory.logChange({
       type: 'cleared',
       timestamp: new Date().toISOString(),
@@ -378,9 +380,10 @@ app.delete('/api/elements/:id', async (req: Request, res: Response) => {
 
     elements.delete(id);
 
-    // Update Redis memory
+    // Update Redis memory incrementally
+    await redisMemory.removeElement(id);
     const allElements = Array.from(elements.values());
-    await redisMemory.storeDiagramState(allElements);
+    await redisMemory.storeDiagramState(allElements, false); // Incremental update
     await redisMemory.logChange({
       type: 'deleted',
       timestamp: new Date().toISOString(),
@@ -642,9 +645,10 @@ app.post('/api/elements/batch', async (req: Request, res: Response) => {
     // Store all elements after binding resolution
     createdElements.forEach(el => elements.set(el.id, el));
 
-    // Update Redis memory
+    // Update Redis memory incrementally
+    await redisMemory.storeElements(createdElements);
     const allElements = Array.from(elements.values());
-    await redisMemory.storeDiagramState(allElements);
+    await redisMemory.storeDiagramState(allElements, false); // Incremental update
     await redisMemory.logChange({
       type: 'batch_created',
       timestamp: new Date().toISOString(),
