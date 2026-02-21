@@ -24,9 +24,12 @@ import {
 } from './types.js';
 import { z } from 'zod';
 import WebSocket from 'ws';
+import { ClaudeVisionService, AIAction } from './claude.js';
 
 // Load environment variables
 dotenv.config();
+
+const visionService = new ClaudeVisionService();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1010,6 +1013,83 @@ app.get('/', (req: Request, res: Response) => {
       res.status(404).send('Frontend not found. Please run "npm run build" first.');
     }
   });
+});
+
+// AI Vision turn: canvas PNG + voice/text prompt → Claude → drawing actions applied to canvas
+// Body: { image: string (base64 PNG), prompt: string }
+app.post('/api/analyze', async (req: Request, res: Response) => {
+  try {
+    const { image, prompt } = req.body as { image: string; prompt: string };
+
+    if (!image || !prompt) {
+      return res.status(400).json({ success: false, error: 'image and prompt are required' });
+    }
+
+    const imageBuffer = Buffer.from(image, 'base64');
+    const aiResponse = await visionService.generateActions(prompt, imageBuffer);
+
+    // Map AI actions to v2 element schema and batch create
+    const elementsToCreate = aiResponse.actions
+      .filter((a: AIAction) => a.action !== 'updateElement')
+      .map((a: AIAction) => {
+        const el = a.element as any;
+        if (a.action === 'addArrow') {
+          return {
+            type: 'arrow',
+            x: el.x ?? 0,
+            y: el.y ?? 0,
+            points: el.points ?? [[0, 0], [100, 0]],
+            strokeColor: el.strokeColor ?? '#000000',
+            strokeWidth: el.strokeWidth ?? 2,
+            endArrowhead: el.endArrowhead ?? 'arrow',
+            startArrowhead: el.startArrowhead ?? null,
+          };
+        }
+        return {
+          type: el.type ?? 'rectangle',
+          x: el.x ?? 0,
+          y: el.y ?? 0,
+          width: el.width,
+          height: el.height,
+          text: el.text,
+          fontSize: el.fontSize,
+          strokeColor: el.strokeColor,
+          backgroundColor: el.backgroundColor,
+          strokeWidth: el.strokeWidth,
+          fillStyle: el.fillStyle,
+        };
+      });
+
+    // Apply elements directly and broadcast via WebSocket
+    const createdElements: ServerElement[] = elementsToCreate.map((el: any) => {
+      const params = CreateElementSchema.parse(el);
+      const id = generateId();
+      const element: ServerElement = {
+        id,
+        ...params,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        version: 1,
+      };
+      elements.set(id, element);
+      return element;
+    });
+
+    const message: BatchCreatedMessage = {
+      type: 'elements_batch_created',
+      elements: createdElements,
+    };
+    broadcast(message);
+
+    res.json({
+      success: true,
+      explanation: aiResponse.explanation,
+      count: createdElements.length,
+    });
+  } catch (error) {
+    logger.error('Analyze error:', error);
+    res.status(500).json({ success: false, error: 'Failed to analyze canvas' });
+  }
 });
 
 // Health check endpoint
